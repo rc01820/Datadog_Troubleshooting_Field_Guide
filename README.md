@@ -6,7 +6,7 @@
 >
 > **Last reviewed:** September 17, 2026
 >
-> **Example convention:** Examples use generic Neomon Labs-style values such as `env:prod`, `app:abc`, `costcenter:eoc`, `site:bos`, and `team:noc`.
+> **Example convention:** Examples use generic Neomon Labs-style values such as `env:prod`, `app:abc`, `costcenter:noc`, `site:bos`, and `team:noc`.
 >
 > **Important:** Datadog features, metric names, integration versions, menu paths, and product availability vary by Datadog site, Agent version, integration version, entitlements, and organization configuration. Verify metric/tag names in Metrics Explorer or the appropriate Explorer before changing production monitoring.
 
