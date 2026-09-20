@@ -4,7 +4,7 @@
 >
 > **Audience:** Datadog administrators, platform engineers, SRE/NOC teams, network engineers, application teams, and developers.
 >
-> **Last reviewed:** September 17, 2026
+> **Last reviewed:** September 20, 2026
 >
 > **Example convention:** Examples use generic Neomon Labs-style values such as `env:prod`, `app:abc`, `costcenter:noc`, `site:bos`, and `team:noc`.
 >
@@ -38,10 +38,19 @@
 22. [API Returns 400 / 401 / 403 / 429](#22-api-returns-400--401--403--429)
 23. [Time / NTP Problems](#23-time--ntp-problems)
 24. [Agent Flare and Escalation](#24-agent-flare-and-escalation)
-25. [Fast Command Reference](#25-fast-command-reference)
-26. [Troubleshooting Decision Trees](#26-troubleshooting-decision-trees)
-27. [Escalation Evidence Template](#27-escalation-evidence-template)
-28. [Official References](#28-official-references)
+25. [Custom Metrics and DogStatsD Not Arriving](#25-custom-metrics-and-dogstatsd-not-arriving)
+26. [Cloud Integration Metrics Missing (AWS / Azure)](#26-cloud-integration-metrics-missing-aws--azure)
+27. [Secret Backend Resolution Failures](#27-secret-backend-enc-resolution-failures)
+28. [Tag Problems and Tag Fragmentation](#28-tag-problems-and-tag-fragmentation)
+29. [Data Is Present but Wrong](#29-data-is-present-but-wrong)
+30. [Downtimes, Mutes, and Suppressed Alerts](#30-downtimes-mutes-and-suppressed-alerts)
+31. [Network Path and Endpoint Reference](#31-network-path-and-endpoint-reference)
+32. [Windows-Specific Notes](#32-windows-specific-notes)
+33. [Migration-Era Pitfalls](#33-migration-era-pitfalls)
+34. [Fast Command Reference](#34-fast-command-reference)
+35. [Troubleshooting Decision Trees](#35-troubleshooting-decision-trees)
+36. [Escalation Evidence Template](#36-escalation-evidence-template)
+37. [Official References](#37-official-references)
 
 ---
 
@@ -127,6 +136,74 @@ Relevant log lines:
 
 For transient incidents, screenshots and exact timestamps are gold. Once the state recovers, some clues evaporate.
 
+## 1.3 Classify the blast radius first
+
+Before opening a single configuration file, establish scope. Scope changes both the likely cause and who needs to be involved.
+
+```text
+One metric on one host          -> check/integration on that host
+All metrics on one host         -> Agent, host, or network path for that host
+One integration everywhere      -> integration version, credentials, or upstream API
+All hosts at one site/subnet    -> network, proxy, firewall, or TLS inspection change
+All hosts everywhere            -> API key, org, site, or Datadog-side incident
+One monitor only                -> monitor configuration or query
+All notifications               -> routing, integration, or downstream receiver
+```
+
+A useful early question: **did anything still arrive during the outage window?**
+
+```text
+Metrics Explorer: avg:datadog.agent.running{*} by {host}
+Event Explorer:   sources:datadog "agent"
+Infrastructure:   sort Host List by "Last reported"
+```
+
+If a hundred hosts stopped at the same second, stop troubleshooting the Agent and start looking at the shared dependency: proxy, firewall rule, certificate, DNS, key rotation, or a site-wide change.
+
+Also check Datadog's own status page before spending an hour proving that your Agent is healthy:
+
+```text
+https://status.datadoghq.com
+```
+
+Select the correct site (US1, US3, US5, EU1, AP1, US1-FED). A degraded intake or delayed metric pipeline on the Datadog side produces symptoms identical to a local collection failure.
+
+## 1.4 Changes that quietly break monitoring
+
+Most "nothing changed" incidents involve one of these:
+
+```text
+API or application key rotated, revoked, or re-scoped
+Proxy or egress policy updated
+TLS inspection enabled on a new subnet or firewall rule set
+Certificate bundle updated on the host
+DNS forwarders changed
+Hostname, domain membership, or FQDN behavior changed
+Agent or integration upgraded (metric renames, deprecations)
+Golden image rebuilt without the Agent or with a stale configuration
+SNMP credentials rotated on the network side only
+Monitor or dashboard edited by another team member
+Tag policy or tag value casing changed upstream
+Cloud IAM role or integration permissions narrowed
+Time source or NTP hierarchy changed
+```
+
+When someone says nothing changed, ask specifically about the list above. "Nothing changed" and "nothing changed that I personally did" are different statements.
+
+## 1.5 What to check *before* declaring a Datadog problem
+
+```text
+Is the underlying resource actually healthy?
+Did the data ever exist, or is this a first-time configuration that never worked?
+Is this a display problem (time range, template variable, saved view)?
+Is the user's role allowed to see this data?
+Is the expectation itself correct?
+```
+
+The last one matters more than it sounds. A large share of "Datadog is broken" tickets are requests for a metric that the source system does not expose.
+
+---
+
 ---
 
 # 2. Universal Triage Flow
@@ -171,6 +248,16 @@ TLS inspection
 system clock
 Datadog site
 ```
+
+Each Datadog product uses its own intake hostname, so partial failures are normal and informative:
+
+```text
+Metrics arrive, logs do not      -> logs intake or logs configuration
+Metrics arrive, traces do not    -> APM intake or trace Agent
+Everything stops at once         -> shared transport (proxy/DNS/cert/key)
+```
+
+See section 31 for the endpoint and port reference used when writing firewall or proxy exceptions.
 
 ## Step 4: Confirm telemetry exists in Datadog
 
@@ -244,7 +331,27 @@ Get-Service DatadogAgent
 & "$env:ProgramFiles\Datadog\Datadog Agent\bin\agent.exe" health
 ```
 
-## 3.2 Integration
+## 3.2 Self-diagnostics
+
+Before reading configuration files by hand, let the Agent report on itself.
+
+Linux:
+
+```bash
+sudo datadog-agent diagnose
+sudo datadog-agent configcheck
+```
+
+Windows:
+
+```powershell
+& "$env:ProgramFiles\Datadog\Datadog Agent\bin\agent.exe" diagnose
+& "$env:ProgramFiles\Datadog\Datadog Agent\bin\agent.exe" configcheck
+```
+
+`diagnose` runs built-in connectivity and configuration suites. `configcheck` prints the configuration the Agent **actually loaded**, including anything resolved through Autodiscovery, which is frequently different from what is sitting on disk.
+
+## 3.3 Integration
 
 Linux:
 
@@ -258,7 +365,7 @@ Windows:
 & "$env:ProgramFiles\Datadog\Datadog Agent\bin\agent.exe" check <CHECK_NAME>
 ```
 
-## 3.3 Network
+## 3.4 Network
 
 Linux:
 
@@ -275,7 +382,7 @@ Resolve-DnsName <target>
 Test-NetConnection <target> -Port 443
 ```
 
-## 3.4 Kubernetes
+## 3.5 Kubernetes
 
 ```bash
 kubectl get pods -A
@@ -284,7 +391,7 @@ kubectl get deployment -A | grep -i datadog
 kubectl get pods -A | grep -i datadog
 ```
 
-## 3.5 Docker
+## 3.6 Docker
 
 ```bash
 docker ps
@@ -293,7 +400,7 @@ docker logs <container>
 docker inspect <container>
 ```
 
-## 3.6 SNMP
+## 3.7 SNMP
 
 First validate the network and credentials independently of the dashboard.
 
@@ -422,6 +529,185 @@ curl -vk https://<DATADOG_INTAKE_OR_SITE>
 nslookup <DATADOG_INTAKE_OR_SITE>
 ```
 
+### Deeper Agent diagnostics
+
+Linux:
+
+```bash
+sudo datadog-agent diagnose
+sudo datadog-agent configcheck
+sudo datadog-agent config
+sudo datadog-agent tagger-list
+sudo datadog-agent version
+sudo datadog-agent status -j > /tmp/agent-status.json
+```
+
+Windows:
+
+```powershell
+& "$env:ProgramFiles\Datadog\Datadog Agent\bin\agent.exe" diagnose
+& "$env:ProgramFiles\Datadog\Datadog Agent\bin\agent.exe" configcheck
+& "$env:ProgramFiles\Datadog\Datadog Agent\bin\agent.exe" config
+& "$env:ProgramFiles\Datadog\Datadog Agent\bin\agent.exe" tagger-list
+```
+
+What each one answers:
+
+```text
+diagnose      problems the Agent can detect about itself (connectivity, config, permissions)
+configcheck   which check configurations were actually loaded and from where
+config        the effective runtime configuration, including defaults you never set
+tagger-list   the tags the Agent will attach to what it collects on this host
+status -j     machine-readable status, useful for scripted fleet health checks
+```
+
+Raise log verbosity temporarily without editing files or restarting (supported on recent Agent 7 versions):
+
+```bash
+sudo datadog-agent config set log_level debug
+sudo datadog-agent config get log_level
+sudo datadog-agent config set log_level info
+```
+
+This is a runtime override and does not survive a restart. Set it back when you are finished; debug logging is extremely verbose and can fill a disk on a busy host.
+
+## How to Read `agent status`
+
+Most Agent incidents are solved by reading this output properly rather than by restarting the service.
+
+Sections worth reading, in order:
+
+```text
+Agent        version, hostname, clock offset, config file path
+Forwarder    transaction counts, retry queue, API key validity
+Collector    Running Checks, Last Successful Execution, Errors, Warnings
+Autodiscovery container/SNMP discovery state
+DogStatsD    packets received, packet errors
+APM Agent    trace receiver state
+Logs Agent   tailers, bytes sent, endpoint state
+Aggregator   flush counts and flush errors
+```
+
+Red flags and what they mean:
+
+```text
+API Key ending with ...: API Key invalid   -> wrong key, wrong org, or wrong site
+Transactions dropped: increasing           -> intake unreachable or persistently rejecting
+Retry queue size: growing, never draining  -> transport blocked (proxy/firewall/TLS)
+Clock offset: large                        -> NTP problem (see section 23)
+Last Successful Execution: Never           -> the check has never worked; configuration issue
+Errors: persistent                         -> integration problem, not a transport problem
+Warnings: repeated                         -> permissions, deprecation, or partial collection
+```
+
+The most useful distinction in this output:
+
+```text
+Forwarder unhealthy, checks healthy  -> transport/credential problem
+Forwarder healthy, one check failing -> that integration only
+Forwarder healthy, all checks failing-> host-level problem (resources, permissions, clock)
+```
+
+Those are three different incidents with three different owners.
+
+## Proxy, TLS, and Endpoint Checks
+
+Agent proxy configuration lives in `datadog.yaml`:
+
+```yaml
+proxy:
+  https: "http://user:password@proxy.example.com:3128"
+  http: "http://user:password@proxy.example.com:3128"
+  no_proxy:
+    - 169.254.169.254
+    - localhost
+    - 127.0.0.1
+```
+
+Environment equivalents:
+
+```text
+DD_PROXY_HTTPS
+DD_PROXY_HTTP
+DD_PROXY_NO_PROXY
+```
+
+Notes that cause real outages:
+
+```text
+Agent proxy settings do not automatically apply to every integration or subprocess.
+Cloud metadata endpoints usually belong in no_proxy.
+A proxy that terminates TLS changes the certificate the Agent sees.
+Proxy credentials embedded in configuration expire like any other secret.
+```
+
+TLS interception is the single most common silent breaker in enterprise networks. Typical Agent log evidence:
+
+```text
+x509: certificate signed by unknown authority
+tls: failed to verify certificate
+certificate is valid for <proxy vendor>, not <datadog endpoint>
+```
+
+Verify what the host actually receives:
+
+```bash
+openssl s_client -connect api.datadoghq.com:443 -servername api.datadoghq.com </dev/null 2>/dev/null \
+  | openssl x509 -noout -issuer -subject -dates
+```
+
+If the issuer is your security appliance, traffic is being inspected. The correct fix is to trust the inspecting CA in the host trust store, or to exempt the Datadog domains from inspection. Disabling certificate validation (`skip_ssl_validation`) may prove the diagnosis in a lab, but it is not a production remedy.
+
+Windows equivalent check:
+
+```powershell
+Test-NetConnection api.datadoghq.com -Port 443
+[Net.ServicePointManager]::SecurityProtocol
+```
+
+## Which Host-Down Signal to Trust
+
+```text
+datadog.agent.up          service check; suitable for host/Agent down detection
+Host monitor type         purpose-built native monitor
+datadog.agent.running     metric; not a reliable down detector on its own
+```
+
+When an Agent dies, its metrics do not become `0` — they become **absent**. A monitor written as "alert when the value equals 0" therefore never fires, because there is no value to evaluate. Down detection must rely on service-check status or explicit No Data behavior, not on a numeric threshold.
+
+Test this deliberately once, in a controlled way, before trusting host-down alerting across a fleet.
+
+## Is More Than One Agent Running?
+
+Duplicate or leftover installations produce confusing, intermittent symptoms.
+
+Linux:
+
+```bash
+ps -ef | grep -i [d]atadog
+systemctl list-units | grep -i datadog
+ls -l /etc/datadog-agent/ /opt/datadog-agent/ 2>/dev/null
+```
+
+Windows:
+
+```powershell
+Get-Service *Datadog*
+Get-Process | Where-Object {$_.Name -like "*agent*"}
+Get-ChildItem "C:\Program Files\Datadog" -ErrorAction SilentlyContinue
+```
+
+Expected Agent 7 services on Windows:
+
+```text
+datadogagent            core Agent
+datadog-trace-agent     APM
+datadog-process-agent   live processes/containers
+datadog-system-probe    network/system probe, when enabled
+```
+
+Two Agents on one host, or an Agent plus a legacy collector, can send conflicting host metadata and produce duplicate or flapping hosts.
+
 ## Likely Causes
 
 ```text
@@ -538,6 +824,87 @@ cloud instance ID
 app tag
 site tag
 ```
+
+## How the Agent Chooses a Hostname
+
+The Agent resolves a hostname from several candidate sources and uses the first acceptable one. Conceptually:
+
+```text
+1. hostname set explicitly in datadog.yaml (or DD_HOSTNAME)
+2. hostname_file, if configured
+3. container/orchestrator identity, in containerized deployments
+4. cloud provider instance metadata (EC2 instance ID, Azure VM ID, and so on)
+5. FQDN / operating system hostname
+```
+
+Consequences worth internalizing:
+
+```text
+Changing the OS hostname creates a NEW Datadog host identity.
+Pinning `hostname:` in datadog.yaml makes identity stable but must be unique per host.
+Duplicate pinned hostnames merge two machines into one confusing host.
+Cloud integrations create their own entities that may not match the Agent host.
+```
+
+Compare what the Agent believes with what the OS believes:
+
+```bash
+sudo datadog-agent hostname
+hostname
+hostname -f
+```
+
+```powershell
+& "$env:ProgramFiles\Datadog\Datadog Agent\bin\agent.exe" hostname
+hostname
+[System.Net.Dns]::GetHostEntry($env:COMPUTERNAME).HostName
+```
+
+If these disagree, the Datadog host name is not a mystery — it is a configuration decision that someone made, possibly by accident.
+
+## Host Aliases
+
+A single host can carry aliases (instance ID, FQDN, short name). Searching only by the name you expect can hide a host that is reporting perfectly well under a different primary name. In the Host List, search by:
+
+```text
+short name
+FQDN
+instance ID
+IP-bearing tag
+any tag you know should exist (app, site, team)
+```
+
+## Host Tag Sources and Precedence
+
+Host tags can arrive from several independent places:
+
+```text
+datadog.yaml `tags:` block
+DD_TAGS environment variable
+cloud provider tags via the cloud integration
+container/orchestrator labels
+tags applied in the Datadog UI or via API
+host tags inherited from integrations
+```
+
+To see what the Agent will actually attach:
+
+```bash
+sudo datadog-agent tagger-list
+```
+
+This is the fastest way to resolve arguments about why a host "has" a tag in one view and not another: host-level tags and metric-level tags are not the same thing, and a tag added in the UI is not visible to the Agent at all.
+
+## Stale, Aged-Out, and Duplicate Hosts
+
+```text
+A host that stops reporting eventually falls out of active infrastructure views.
+Old host identities linger for a period after a rename before aging out.
+Two identities for one machine usually means hostname or metadata changed.
+A cloud integration entity is not the same object as an Agent-reporting host.
+```
+
+When validating a migration or a rebuild, check the **last reported** timestamp rather than mere presence in a list.
 
 ## Likely Causes
 
@@ -672,6 +1039,46 @@ Then add:
 site:bos
 ```
 
+## Check the Metric Summary First
+
+Before debugging queries, open the metric in **Metrics → Summary**. It answers several questions at once:
+
+```text
+Does the metric exist in this org at all?
+Which tags/tag keys are actually attached?
+What is the metric type (gauge, count, rate, distribution)?
+What unit is declared?
+What is the collection interval?
+Has it stopped reporting, and when?
+How many distinct tag values exist (cardinality)?
+```
+
+If the tag key you are filtering on is not listed there, the query was never going to work, regardless of how correct it looks.
+
+## Tag Case and Tag Drift
+
+Tag values collected by the Agent are normalized to lowercase. Values submitted through other paths — API, DogStatsD, custom scripts, imports from a previous monitoring platform — may preserve whatever case they were given.
+
+The result is fragmentation:
+
+```text
+site:BOS
+site:Bos
+site:bos
+```
+
+Three tag values, three sets of results, one very confusing dashboard. Normalize to lowercase at the point of submission, regardless of path. See section 28 for the full treatment.
+
+## Metric vs Host vs Monitor Tags
+
+```text
+Host tag       attached to the host object; visible in the Host List and on host-tagged metrics
+Metric tag     attached to the individual data points at submission time
+Monitor tag    metadata on the monitor object, used by search and Notification Rules
+```
+
+These three are frequently confused. A tag that exists on a host does not automatically exist on every metric, and neither one puts a tag on a monitor.
+
 ## Likely Causes
 
 ```text
@@ -792,6 +1199,70 @@ Examples:
 & "$env:ProgramFiles\Datadog\Datadog Agent\bin\agent.exe" check vsphere
 & "$env:ProgramFiles\Datadog\Datadog Agent\bin\agent.exe" check docker
 ```
+
+### Verify what the Agent actually loaded
+
+```bash
+sudo datadog-agent configcheck
+```
+
+```powershell
+& "$env:ProgramFiles\Datadog\Datadog Agent\bin\agent.exe" configcheck
+```
+
+Configuration on disk is not the same as configuration in use. `configcheck` shows the instances the Agent loaded and the source of each one.
+
+Expected configuration locations:
+
+```text
+Linux    /etc/datadog-agent/datadog.yaml
+         /etc/datadog-agent/conf.d/<integration>.d/conf.yaml
+
+Windows  C:\ProgramData\Datadog\datadog.yaml
+         C:\ProgramData\Datadog\conf.d\<integration>.d\conf.yaml
+```
+
+Common mistakes that produce a silently ignored file:
+
+```text
+conf.yml instead of conf.yaml
+file placed in conf.d/ rather than conf.d/<integration>.d/
+leftover conf.yaml.example still in place and the real file misnamed
+file not readable by the Agent user (dd-agent on Linux, ddagentuser on Windows)
+tab characters in YAML indentation
+unquoted value beginning with a special character
+```
+
+### Run the check with more detail
+
+```bash
+sudo -u dd-agent datadog-agent check <CHECK_NAME> --log-level debug
+sudo -u dd-agent datadog-agent check <CHECK_NAME> --check-rate
+```
+
+Flags vary by Agent version. Confirm what your build supports:
+
+```bash
+sudo -u dd-agent datadog-agent check --help
+```
+
+### Confirm the integration package and version
+
+```bash
+sudo datadog-agent integration show <INTEGRATION_NAME>
+sudo datadog-agent integration freeze
+```
+
+Version matters: metric names, configuration options, and defaults change between integration releases. A configuration copied from current documentation can be invalid for an older installed integration, and a metric that "disappeared" may simply have been renamed upstream.
+
+### Permissions and ownership
+
+```bash
+sudo ls -l /etc/datadog-agent/conf.d/<integration>.d/
+sudo -u dd-agent cat /etc/datadog-agent/conf.d/<integration>.d/conf.yaml >/dev/null && echo readable
+```
+
+If the Agent user cannot read the file, the check never runs — and the Agent may report nothing more specific than the absence of the integration.
 
 ## Likely Causes
 
@@ -1070,6 +1541,88 @@ snmpwalk -v2c -c '<community>' <IP> 1.3.6.1.2.1.1
 ```
 
 For v3 use the exact security parameters for the device.
+
+## Which SNMP Configuration Model Are You Using?
+
+Two models exist, and they fail differently:
+
+```text
+A. Explicit instances
+   conf.d/snmp.d/conf.yaml with one instance per device or per IP
+
+B. Autodiscovery
+   snmp_listener configuration in datadog.yaml scanning subnets with
+   one or more credential profiles
+```
+
+Diagnostic implications:
+
+```text
+Explicit    a device missing means that instance is wrong or unreachable
+Discovery   a device missing may mean it was never scanned, never answered,
+            or answered with credentials that did not match any configured profile
+```
+
+Confirm which model is live:
+
+```bash
+sudo datadog-agent configcheck | grep -A20 -i snmp
+sudo datadog-agent status | grep -A30 -i "autodiscovery"
+```
+
+## Device Namespace
+
+Devices are identified by IP **within a namespace**. The namespace is part of device identity.
+
+```text
+Same device, two pollers, same namespace       -> one device object (normal HA behavior)
+Same device, two pollers, different namespaces -> two device objects (duplicate inventory)
+Namespace changed after onboarding             -> old device object goes stale
+```
+
+When running redundant pollers, treat the namespace value as a deliberate design decision and keep it consistent.
+
+## Useful OIDs When Proving Reachability
+
+Walk small, well-known trees before walking an entire device:
+
+```text
+1.3.6.1.2.1.1          system group (sysDescr, sysObjectID, sysUpTime, sysName)
+1.3.6.1.2.1.1.2        sysObjectID  (drives Datadog profile selection)
+1.3.6.1.2.1.2.2        ifTable      (interfaces, 32-bit counters)
+1.3.6.1.2.1.31.1.1     ifXTable     (interface names/aliases, 64-bit counters)
+```
+
+Example:
+
+```bash
+snmpwalk -v2c -c '<community>' <IP> 1.3.6.1.2.1.1
+snmpget  -v2c -c '<community>' <IP> 1.3.6.1.2.1.1.2.0
+```
+
+If `sysObjectID` does not return, profile troubleshooting is premature — you have a reachability or credential problem.
+
+If `sysObjectID` returns but Datadog applies a generic profile, the device is reachable and the issue is profile mapping instead.
+
+## Credentials Stored in a Secret Backend
+
+If credentials are referenced as `ENC[...]`, an SNMP failure may actually be a secret-resolution failure. Confirm before blaming the network:
+
+```bash
+sudo datadog-agent secret
+```
+
+See section 27.
+
+## UDP Fails Quietly
+
+SNMP runs over UDP, so a blocked path usually produces a timeout rather than a rejection.
+
+```text
+No response can mean: dropped, filtered, wrong credentials, or device ACL denial
+```
+
+Validate the path from the **polling Agent's** source address, not from a workstation. A device ACL that permits the old SolarWinds poller will silently ignore a new Datadog poller until the ACL is updated.
 
 ## Likely Causes
 
@@ -1551,6 +2104,25 @@ Time:
 w32tm /query /status
 ```
 
+## Worker Capacity Math
+
+Private Location capacity is a function of test count, frequency, and duration — not of how many tests "feel" small.
+
+```text
+Concurrent capacity needed ≈ (tests per minute) × (average test duration in minutes)
+```
+
+Symptoms of under-provisioning look like failures rather than like capacity problems:
+
+```text
+tests run late or skip intervals
+intermittent timeouts under load but not during a manual Fast Test
+remaining-slot metric trending toward zero
+latency graphs that worsen at scheduled peaks (top of the hour is common)
+```
+
+Staggering test frequency across a location is often cheaper than adding workers. Scheduling every test at the same interval concentrates load into the same few seconds of each minute.
+
 ## Likely Causes
 
 ```text
@@ -1872,6 +2444,38 @@ Use the correct Agent service/host strategy for your runtime.
 ## Agent 7.80+ Note
 
 On Linux with newer Agent behavior, the trace Agent can use socket activation and may not appear running until trace data arrives. Therefore, a status line saying APM is not running before any trace submission is not automatically proof of a problem.
+
+## Unified Service Tagging
+
+APM, logs, and infrastructure only correlate when the three reserved tags agree:
+
+```text
+env
+service
+version
+```
+
+Set them consistently at every layer:
+
+```text
+Application   DD_ENV, DD_SERVICE, DD_VERSION (or tracer configuration)
+Agent         tags in datadog.yaml / DD_TAGS
+Container     labels or pod annotations
+```
+
+A service that appears twice in APM under slightly different names is almost always a `DD_SERVICE` mismatch between deployments, not a tracing failure. A trace that exists but has no correlated logs is usually an `env` or `service` mismatch rather than a log pipeline problem.
+
+## Sampling vs Missing
+
+"No traces" and "not the traces I expected" are different problems:
+
+```text
+No spans reaching the Agent     -> tracer/network/configuration (this section)
+Spans arrive, specific traces absent -> sampling, retention filters, or search window
+Service visible, resource absent     -> instrumentation coverage or resource naming
+```
+
+Confirm the Agent is receiving spans before changing sampling configuration. The `APM Agent` section of `agent status` reports received and sent trace payloads.
 
 ## Likely Causes
 
@@ -2388,6 +2992,75 @@ No Data: {{monitor.name}} has stopped reporting.
 {{/is_no_data}}
 ```
 
+## The Four Timing Knobs
+
+Most "the monitor should have fired" arguments come down to these:
+
+```text
+Evaluation window     how much data each evaluation considers
+Evaluation delay      how long to wait before evaluating, for late-arriving data
+New group delay       grace period before a newly seen group can alert
+Require full window   whether an evaluation runs when data is incomplete
+```
+
+Interactions that surprise people:
+
+```text
+Require full window + sparse metric   -> evaluation skipped, monitor stays OK
+Evaluation delay too small + cloud metric -> monitor evaluates empty windows
+New group delay + short-lived hosts   -> group never becomes eligible to alert
+Long window + brief spike             -> average never crosses threshold
+```
+
+A monitor that "missed" a spike is often working exactly as configured. Graph the query with the same window and aggregation the monitor uses before assuming a defect.
+
+## Multi-Alert (Grouped) Monitor Lifecycle
+
+A monitor grouped `by {host}` is not one monitor — it is one monitor per group:
+
+```text
+Group appears      -> new group delay applies before it can alert
+Group alerts       -> notification sent for that group only
+Group stops reporting -> the group can go No Data or be dropped after group retention
+Group disappears   -> no recovery notification is sent for a group that vanished
+```
+
+This explains one of the most common complaints: an alert that never recovers because the group simply stopped existing, and an alert that never fires because the group is brand new.
+
+Check grouping deliberately:
+
+```text
+avg:system.cpu.user{env:prod} by {host}      one alert per host
+avg:system.cpu.user{env:prod}                one alert overall
+```
+
+Grouping also determines what tags the notification carries, which in turn affects routing.
+
+## Read the Monitor's Own History
+
+The monitor status page is evidence, not decoration. It shows:
+
+```text
+evaluation results over time
+state transitions with timestamps
+which groups transitioned
+whether evaluations were skipped
+downtime/mute overlays
+notification events
+```
+
+If the history shows no evaluation at the moment you expected an alert, the problem is data or evaluation configuration. If it shows a transition but no delivery, the problem is routing — go to section 20.
+
+## Recovery, Renotify, and Auto-Resolve
+
+```text
+Recovery threshold   separate from the alert threshold; prevents flapping
+Renotify interval    re-sends while a monitor remains in a triggered state
+Auto-resolve         closes a triggered group after a period without data
+```
+
+Silence after an alert can mean recovery, renotify being disabled, or auto-resolve quietly closing something that never actually recovered. Verify which one occurred before reporting the incident as resolved.
+
 ## Likely Causes
 
 ```text
@@ -2520,6 +3193,137 @@ Example:
 ```text
 Disk space is low @ops@example.com
 ```
+
+## The Delivery Chain, In Order
+
+Each link produces different evidence:
+
+```text
+1. Monitor evaluates and transitions        -> monitor status page / history
+2. Notification event is generated          -> Events Explorer
+3. Routing decides recipients               -> Notification Rules / message handles
+4. Integration accepts the payload          -> integration status, webhook response code
+5. Downstream service delivers              -> receiver logs, mail gateway, SMS gateway
+6. Human receives it                        -> the only test that actually matters
+```
+
+Confirm step 2 independently in the Events Explorer, scoped to the monitor:
+
+```text
+source:alert
+```
+
+combined with the monitor name or the relevant tags. If the event exists but nobody received anything, the failure is at step 3 or later, and no amount of monitor editing will help.
+
+## Which Tags Routing Actually Matches
+
+This is the most common routing defect:
+
+```text
+Monitor tags        metadata on the monitor object      <- Notification Rules match these
+Metric query scope  avg:metric{app:abc}                 <- NOT monitor metadata
+Host tags           tags on the host object             <- NOT monitor metadata
+Group tags          tags of the triggering group        <- behavior differs; verify
+```
+
+Putting `app:abc` in the query does not tag the monitor. If your rules key on `app:`, every monitor must carry that tag explicitly on the monitor object.
+
+Verify with the monitor search syntax rather than by eye:
+
+```text
+tag:app:abc            monitors carrying the monitor tag app:abc
+scope:app:abc          monitors whose query scope includes app:abc
+```
+
+The two lists being different is normal — and is exactly the gap that causes silent monitors.
+
+Before a large rollout, confirm empirically whether your rules match group-level tags as well as monitor-level tags. Build one monitor, force one transition, observe the result, and only then scale.
+
+## Conditional Message Blocks
+
+A notification can be suppressed by its own template. The message must include a branch for the state you expect:
+
+```handlebars
+{{#is_alert}}      triggered
+{{#is_warning}}    warning threshold
+{{#is_no_data}}    no data
+{{#is_recovery}}   recovered from alert or warning
+{{#is_alert_recovery}}   recovered specifically from alert
+{{#is_warning_recovery}} recovered specifically from warning
+{{#is_alert_to_warning}} severity decreased
+```
+
+If every recipient handle sits inside `{{#is_alert}}`, then recoveries and No Data notifications go nowhere, and the monitor looks "broken" only in one direction.
+
+Useful variables in messages:
+
+```text
+{{monitor.name}}     {{host.name}}      {{value}}
+{{threshold}}        {{comparator}}     {{last_triggered_at}}
+{{.name}} / {{.value}} for the triggering group tag
+```
+
+## Webhook Debugging
+
+Webhook payloads use `$`-style variables, for example:
+
+```text
+$EVENT_TITLE   $EVENT_MSG      $ALERT_TYPE
+$ALERT_TRANSITION               $ALERT_STATUS
+$HOSTNAME      $TAGS           $PRIORITY
+$LINK          $ID             $LAST_UPDATED
+$SNAPSHOT      $ORG_ID
+```
+
+Debugging order for a custom webhook receiver (a mail/SMS gateway, a ticketing bridge, or a homegrown router):
+
+```text
+1. Does the receiver's access log show the request at all?
+2. What status code did it return? 2xx or a rejection?
+3. Did the payload parse? Log the raw body during testing.
+4. Did a required variable arrive empty? Unset variables serialize as empty strings.
+5. Did the receiver deliver onward (mail queue, SMS provider, ticket API)?
+6. Did downstream filtering discard it (spam rules, quiet hours, dedup)?
+```
+
+Test the endpoint independently first:
+
+```bash
+curl -i -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"title":"routing test","msg":"manual test","alert_type":"error"}' \
+  https://<webhook-target>
+```
+
+If a webhook works with curl but fails from Datadog, look at egress restrictions on the receiver, IP allowlisting, and TLS/certificate requirements.
+
+## Email-Specific Failures
+
+Email is the routing path most likely to fail silently:
+
+```text
+recipient address not verified in Datadog
+distribution list rejects external senders
+mail gateway quarantines the message
+SPF/DKIM/DMARC failure on the sending domain
+message classified as bulk and delivered to a folder nobody reads
+per-recipient rate or size limits
+```
+
+"No alert received" is a claim about a human inbox. Confirm the message left Datadog and reached the mail system before concluding that Datadog did not send it.
+
+## Build a Routing Test That Is Safe to Repeat
+
+```text
+1. One synthetic monitor whose state you can force deliberately.
+2. Exactly the tags used by the routing rule under test.
+3. A recipient you control.
+4. One transition, observed end to end.
+5. One recovery, observed end to end.
+6. Then scale, with dry-run output reviewed before any bulk write.
+```
+
+Checking routing coverage in bulk afterward is a reporting exercise: list monitors, list rules, and identify monitors that match no rule. A monitor that matches no rule is a silent monitor, and silent monitors are how outages become surprises.
 
 ## Likely Causes
 
@@ -2917,6 +3721,29 @@ Actions API access not enabled
 product not available in organization/site
 ```
 
+### A 403 does not always mean "missing permission"
+
+Datadog can return the same forbidden response for several distinct conditions:
+
+```text
+the application key lacks the required scope
+the key owner's role lacks the underlying permission
+the resource itself is restricted
+the product is not enabled for the organization or site
+the endpoint does not exist for that site
+```
+
+Read the response body, not just the status code. Wording that references failed permission authorization checks points to a permissions problem. An empty or generic body on an endpoint that works elsewhere often points to product availability or site differences instead — which no amount of scope-granting will fix.
+
+Capture the full response while diagnosing:
+
+```bash
+curl -i -X GET \
+  -H "DD-API-KEY: $DD_API_KEY" \
+  -H "DD-APPLICATION-KEY: $DD_APP_KEY" \
+  "https://<DATADOG_API_SITE>/api/v2/..." | tee /tmp/dd-403.txt
+```
+
 ## Resolution
 
 Apply least privilege:
@@ -3025,6 +3852,32 @@ Datadog provides API usage metrics for rate-limited APIs that can help identify 
 
 ---
 
+# 22.5 Other Status Codes Worth Recognizing
+
+```text
+404  wrong path, wrong API version, wrong site, or object deleted/never existed
+405  correct path, wrong HTTP method
+409  conflict — object already exists, or concurrent modification
+413  payload too large — batch size too aggressive
+422  request understood but semantically invalid for this resource
+500  Datadog-side error; retry with backoff, then escalate with request details
+502/503/504  transient gateway/availability issue or a proxy in the middle
+```
+
+Useful habits for automation:
+
+```text
+Treat 4xx as "fix the request"; treat 5xx and 429 as "retry with backoff".
+Log the request ID/response headers on failure, not just the body.
+Never retry a non-idempotent POST blindly — check whether the object was created.
+Make create operations create-or-update (lookup, diff, then PATCH only on change).
+Always support a dry-run mode before any bulk write.
+```
+
+A 409 during a bulk migration usually means the script is not idempotent, not that Datadog is misbehaving.
+
+---
+
 # 23. Time / NTP Problems
 
 Time errors can masquerade as unrelated Datadog failures.
@@ -3119,6 +3972,31 @@ kubectl exec -it <DATADOG_AGENT_POD> -- agent flare <CASE_ID>
 & "$env:ProgramFiles\Datadog\Datadog Agent\bin\agent.exe" flare
 ```
 
+## Local and Remote Flares
+
+Generate a flare without sending it, for review under a data-handling policy:
+
+```bash
+sudo datadog-agent flare --local
+```
+
+The archive is written locally; upload it manually after review.
+
+If Remote Configuration and Fleet Automation are available and supported for your site and Agent version, a flare can also be requested remotely from the Datadog UI, which is useful when shell access requires a change request.
+
+## Raise Log Level Before Collecting
+
+A flare taken while the Agent is logging at `info` may not contain the detail support needs. When the problem is reproducible:
+
+```bash
+sudo datadog-agent config set log_level debug
+# reproduce the problem
+sudo datadog-agent flare <CASE_ID>
+sudo datadog-agent config set log_level info
+```
+
+Note the exact reproduction time so support can find it in the archive.
+
 ## Before Escalating
 
 Capture:
@@ -3143,7 +4021,909 @@ A support case with a timestamped SNMP walk failure, Agent check output, source 
 
 ---
 
-# 25. Fast Command Reference
+# 25. Custom Metrics and DogStatsD Not Arriving
+
+Custom metrics submitted from application code, scripts, or automation follow a different path than integration metrics, and they fail in different ways.
+
+## Symptoms
+
+```text
+Script reports success but the metric never appears
+Metric appears briefly and then stops
+Counts are lower than expected
+Metric appears without expected tags
+Metric arrives from one host but not from a container
+Metric name exists but has no recent points
+```
+
+## Checks
+
+Identify the submission path first:
+
+```text
+A. DogStatsD to the Agent (UDP 8125 or a Unix socket)
+B. HTTP API submission directly to Datadog
+C. Agent custom check (Python check in checks.d)
+D. Tracer/library metrics (runtime metrics, custom spans metrics)
+```
+
+Each has a different failure mode:
+
+```text
+A  packets silently dropped; nothing errors
+B  HTTP status code tells you what happened
+C  appears in `agent status` under Running Checks
+D  depends on tracer configuration and Agent APM configuration
+```
+
+## Commands
+
+DogStatsD statistics from the Agent:
+
+```bash
+sudo datadog-agent status | grep -A20 -i dogstatsd
+sudo datadog-agent dogstatsd-stats
+```
+
+Send a test metric by hand:
+
+```bash
+echo -n "test.metric.manual:1|c|#env:prod,source:manual" | nc -u -w1 127.0.0.1 8125
+```
+
+PowerShell equivalent:
+
+```powershell
+$u = New-Object System.Net.Sockets.UdpClient
+$b = [Text.Encoding]::ASCII.GetBytes("test.metric.manual:1|c|#env:prod,source:manual")
+$u.Send($b, $b.Length, "127.0.0.1", 8125)
+$u.Close()
+```
+
+Then search Metrics Explorer for:
+
+```text
+test.metric.manual
+```
+
+Direct API submission test:
+
+```bash
+curl -i -X POST "https://api.<DATADOG_SITE>/api/v2/series" \
+  -H "Content-Type: application/json" \
+  -H "DD-API-KEY: $DD_API_KEY" \
+  -d '{"series":[{"metric":"test.metric.api","type":3,"points":[{"timestamp":'"$(date +%s)"',"value":1}],"tags":["env:prod","source:manual"]}]}'
+```
+
+A `202` means accepted for processing — not that the point is queryable yet.
+
+## Likely Causes
+
+```text
+UDP packets dropped: buffer too small, high volume, or no listener
+DogStatsD disabled in the Agent
+Container sends to localhost instead of the Agent host/socket
+dogstatsd_non_local_traffic not enabled when traffic is not local
+Port 8125 blocked or already in use
+Metric name contains invalid characters
+Counter vs gauge semantics misunderstood
+Tag cardinality causes rate limiting or truncation
+Short-lived process exits before flush
+Custom check raises an exception and never submits
+API submission returns 2xx but with the wrong timestamp units
+```
+
+## Resolution
+
+```text
+Packet loss        increase receive buffer / use Unix socket / batch submissions
+Container path     point the client at the Agent host or a mounted socket
+Non-local traffic  enable it explicitly and restrict access at the network layer
+Short-lived jobs   flush before exit, or submit via API instead of DogStatsD
+Cardinality        remove unbounded tag values (request IDs, timestamps, full URLs)
+Naming             use lowercase, dots for namespacing, no spaces or high-cardinality suffixes
+```
+
+Unbounded tags are the most expensive mistake in this section. A tag value derived from a user ID, a request ID, or a timestamp turns one metric into millions of time series, and the consequences are billing as well as performance.
+
+## Validation
+
+```text
+dogstatsd-stats shows packets received and no growing error counters
+manual test metric appears in Metrics Explorer within a normal delay
+expected tags are present in Metric Summary
+counts align with a known-quantity test (submit exactly 10, expect 10)
+```
+
+---
+
+# 26. Cloud Integration Metrics Missing (AWS / Azure)
+
+Cloud metrics are collected by Datadog's crawlers through the cloud provider's own monitoring API. There is no Agent in this path, so Agent troubleshooting does not apply.
+
+## Symptoms
+
+```text
+Cloud resource exists but no metrics in Datadog
+Some services report, others do not
+Metrics arrive late
+Metrics stop after an IAM/role change
+Resource tags missing from Datadog metrics
+Cloud account appears configured but no data
+```
+
+## Checks
+
+```text
+Is the integration tile configured for the correct account/subscription?
+Does the cross-account role or app registration still exist?
+Are the required read permissions still attached?
+Is the specific service/namespace enabled in the integration configuration?
+Do account-level tag filters exclude this resource?
+Does the resource actually publish the metric in the provider's own console?
+Is the metric delayed rather than missing?
+Are provider-side API limits being hit?
+```
+
+Verify at the source first:
+
+```bash
+aws cloudwatch list-metrics --namespace AWS/EC2 --region us-east-1 \
+  --dimensions Name=InstanceId,Value=<INSTANCE_ID>
+
+aws cloudwatch get-metric-statistics --namespace AWS/EC2 \
+  --metric-name CPUUtilization --region us-east-1 \
+  --dimensions Name=InstanceId,Value=<INSTANCE_ID> \
+  --start-time <ISO8601> --end-time <ISO8601> --period 300 --statistics Average
+```
+
+If the provider does not have the data, Datadog cannot have it either.
+
+## Likely Causes
+
+```text
+role/app registration deleted, expired, or re-scoped
+required permissions removed by a security policy change
+metric namespace not enabled in the integration configuration
+tag-based filtering excludes the resource
+resource is in a region or subscription that was never added
+detailed/enhanced monitoring not enabled on the resource
+provider API throttling the crawler
+metric genuinely delayed (crawler-based collection is not real time)
+expecting an Agent-only metric from a cloud-only resource
+```
+
+The last one is common: memory and disk metrics for an EC2 instance generally require an Agent. The cloud provider does not publish them by default.
+
+## Resolution
+
+```text
+Permissions      restore the documented read permissions; re-validate the integration tile
+Namespaces       enable only the services you actually need
+Tag filters      confirm include/exclude expressions and their case sensitivity
+Delay            set a monitor evaluation delay appropriate for crawler latency
+Coverage         install the Agent where host-level detail is required
+Throttling       reduce namespace scope or spread accounts across integrations
+```
+
+For monitors on crawler-collected metrics, an evaluation delay of at least 15 minutes is a common baseline. Without it, monitors evaluate windows that were always going to be empty.
+
+## Validation
+
+```text
+integration tile reports no errors
+expected namespaces enabled
+metrics visible in Metrics Explorer with provider tags attached
+timestamps consistent with provider-side delay, not older
+monitors on these metrics stop producing spurious No Data
+```
+
+---
+
+# 27. Secret Backend (`ENC[]`) Resolution Failures
+
+When credentials are referenced as `ENC[...]`, a credential failure may be a secret-resolution failure rather than a wrong password.
+
+## Symptoms
+
+```text
+Integration reports authentication failure with credentials known to be correct
+Agent log shows secret backend errors at startup
+Check configuration loads but the credential field is empty
+Behavior differs between a manual check run and the running Agent
+Works on one host, fails on another with identical configuration
+```
+
+## Checks
+
+```text
+Is secret_backend_command configured and pointing at an existing executable?
+Are the file permissions and ownership correct for the Agent user?
+Does the backend return valid JSON for every requested handle?
+Does the executing identity have access to the secret store?
+Is the token/credential used by the backend itself still valid?
+Is the handle name spelled exactly as stored?
+```
+
+## Commands
+
+```bash
+sudo datadog-agent secret
+```
+
+```powershell
+& "$env:ProgramFiles\Datadog\Datadog Agent\bin\agent.exe" secret
+```
+
+This reports the configured backend, permission verification results, and which handles resolved. Treat it as the authoritative answer to "did the Agent actually get the secret?"
+
+Permission expectations:
+
+```text
+Linux    executable owned by root (or the documented owner), not writable by others,
+         executable by the Agent user, typically mode 500/700 as documented
+
+Windows  executable readable/executable only by ddagentuser and the Administrators group;
+         inherited permissions are a common cause of refusal to run the backend
+```
+
+The Agent deliberately refuses to run a secret backend with loose permissions. A refusal is a safety feature, not a bug.
+
+## Likely Causes
+
+```text
+executable path wrong or not present on this host
+permissions too permissive, so the Agent refuses to execute it
+Agent user cannot execute the backend
+backend returns malformed JSON or a non-zero exit code
+backend depends on an environment variable the Agent service does not have
+underlying store unreachable (network/DNS/token expiry)
+secret rotated in the store but the handle name changed
+container image missing the backend binary or its dependencies
+```
+
+Environment differences deserve special attention: a backend that works when you run it interactively may fail under the service account, which has a different environment, different proxy settings, and no interactive session.
+
+## Resolution
+
+```text
+1. Run `datadog-agent secret` and read the permission verification output.
+2. Correct ownership/permissions to the documented values.
+3. Execute the backend manually AS THE AGENT USER and inspect stdout.
+4. Validate the JSON shape returned for a single handle.
+5. Confirm the store is reachable from the host and the auth token is valid.
+6. Restart the Agent and re-check.
+```
+
+Manual execution pattern on Linux:
+
+```bash
+echo '{"version":"1.0","secrets":["<handle>"]}' | sudo -u dd-agent /path/to/secret-backend
+```
+
+## Validation
+
+```text
+`datadog-agent secret` lists the handle as resolved
+the dependent check authenticates successfully
+no secret-backend errors in agent.log after restart
+rotation test: rotate in the store, restart, confirm the new value is used
+```
+
+---
+
+# 28. Tag Problems and Tag Fragmentation
+
+Tags are the join key for everything in Datadog: queries, dashboards, monitors, routing, cost attribution, and access control. Tag problems rarely announce themselves — they show up as missing data, partial dashboards, and alerts that go to nobody.
+
+## Symptoms
+
+```text
+Query returns fewer hosts than expected
+Dashboard populates for one team and not another
+Notification Rule matches nothing
+Two tag values that should be one
+Tag visible on the host but not on the metric
+Group-by produces an unexpected number of groups
+Cost/usage attribution incomplete
+```
+
+## The Case Problem
+
+Agent-side ingestion normalizes tag values to lowercase. Submissions through other paths may preserve case.
+
+```text
+site:BOS   from an import script
+site:Bos   from a spreadsheet
+site:bos   from the Agent
+```
+
+These do not merge. Queries filtering on one miss the others, and no error is produced anywhere.
+
+```text
+Normalize to lowercase at submission time, on every path:
+API submissions, DogStatsD, imports, migration scripts, UI-applied host tags.
+```
+
+Validate after any bulk import:
+
+```text
+Metrics Explorer -> group by the tag key and look for near-duplicate values
+Metric Summary   -> inspect the full tag value list for a representative metric
+```
+
+## Where a Tag Lives Matters
+
+```text
+Host tag      on the host object            affects host-scoped queries and host tag views
+Metric tag    on the data points            affects metric queries
+Monitor tag   on the monitor object         affects monitor search and Notification Rules
+Log tag       on log events / pipelines     affects log queries and log-based monitors
+Span tag      on traces                     affects APM search and trace metrics
+Integration tag attached by the integration configuration
+```
+
+A tag applied in the Datadog UI to a host does not retroactively appear on metric points already submitted, and it does not appear on monitors at all.
+
+## Reserved and Structural Tags
+
+```text
+host      identity join key across products
+env       unified service tagging
+service   unified service tagging
+version   unified service tagging
+```
+
+Overloading or misusing these breaks correlation between infrastructure, APM, and logs in ways that are tedious to unwind later.
+
+## Cardinality
+
+```text
+Good tag values:   bounded, meaningful, stable  (env, app, site, team, role)
+Bad tag values:    unbounded or unique per event (request_id, timestamp, full URL, PID)
+```
+
+High cardinality drives custom-metric counts, slows queries, and can silently truncate what you see.
+
+## Checks
+
+```text
+Does the tag key exist on this data type at all?
+Is the value spelled and cased exactly as queried?
+Is it applied at the right layer (host vs metric vs monitor)?
+Did it exist during the time range being queried?
+Is it applied consistently across every collection path?
+Is any object missing a tag your routing depends on?
+```
+
+## Commands
+
+Agent-side view:
+
+```bash
+sudo datadog-agent tagger-list
+sudo datadog-agent status | grep -A20 -i "host tags"
+```
+
+Inventory-style audit via the API (adapt to the object type):
+
+```bash
+curl -s -H "DD-API-KEY: $DD_API_KEY" -H "DD-APPLICATION-KEY: $DD_APP_KEY" \
+  "https://api.<DATADOG_SITE>/api/v1/monitor" \
+  | python -c "import sys,json;[print(m['id'], m['name'], m.get('tags')) for m in json.load(sys.stdin)]"
+```
+
+## Resolution
+
+```text
+1. Decide the authoritative tag schema and write it down: keys, allowed values, casing.
+2. Enforce it at submission, not by cleanup afterwards.
+3. Remediate existing objects deliberately, with a dry run first.
+4. Re-audit after every bulk change and after every onboarding wave.
+5. Gate automation on compliance rather than discovering drift months later.
+```
+
+Tag governance is much cheaper to establish before an estate is onboarded than to retrofit afterwards, because every dashboard, monitor, and routing rule written in the meantime encodes the inconsistency.
+
+## Validation
+
+```text
+grouping by the tag key yields the expected value set, with no near-duplicates
+routing rules match the expected monitor population
+dashboards populate for every team, not just the first one onboarded
+no object that should be routed is missing its routing tag
+```
+
+---
+
+# 29. Data Is Present but Wrong
+
+Not every incident is missing data. Some are data that arrives and is then misread — by a query, a widget, or a human.
+
+## Symptoms
+
+```text
+Graph shows a number nobody believes
+Value differs between two widgets using "the same" metric
+Sum across groups does not match the total
+Counts look too low at wide time ranges
+Percentages exceed 100
+Spike disappears when the time range widens
+Two dashboards disagree about the same hour
+```
+
+## Metric Types
+
+```text
+GAUGE          last value in the interval; averaging across time is meaningful
+COUNT          number of events in the interval; summing is meaningful
+RATE           per-second value; comparing to a count directly is not meaningful
+DISTRIBUTION   percentile-capable; aggregation rules differ from gauges
+```
+
+Using the wrong aggregation for the type is the most common source of wrong-looking numbers.
+
+```text
+.as_count()    interpret as raw counts
+.as_rate()     interpret as per-second
+sum vs avg     across groups, these answer different questions
+```
+
+## Rollups Hide Spikes
+
+At wide time ranges, points are aggregated into buckets. The default aggregation can smooth away exactly the spike you are investigating.
+
+```text
+.rollup(max, 60)   preserve peaks
+.rollup(avg, 60)   smooth
+.rollup(sum, 60)   totals
+```
+
+If a spike is visible at a 1-hour window and invisible at 1 week, the data did not change — the bucket aggregation did.
+
+## Aggregation Across Space vs Time
+
+```text
+avg:metric{*}            averages across all matching series (space)
+.rollup(avg, 300)        averages within each bucket (time)
+avg:metric{*} by {host}  no cross-host averaging; one series per host
+```
+
+A dashboard that averages across hosts will understate a single hot host, and a monitor written the same way will never fire for it.
+
+## Interpolation and Sparse Data
+
+```text
+default_zero()   treat missing as zero — only when zero is semantically correct
+Sparse series    can appear to "drop to nothing" purely because of a gap
+```
+
+Applying `default_zero()` to a metric where absence means "not collected" (rather than "nothing happened") manufactures data that never existed.
+
+## Units and Scale
+
+```text
+bytes vs bits              factor of 8, usually noticed only on a network graph
+bytes vs kilobytes         off by 1024, usually noticed by a capacity planner
+percent as 0-1 vs 0-100    a graph that tops out at 1 or at 10,000
+counters vs derived rates  SNMP counters especially
+```
+
+Check the declared unit in Metric Summary before rescaling anything in a formula. Correcting units in a widget formula while the underlying metric is already correct doubles the error.
+
+## Counter Wraps and Resets
+
+```text
+SNMP 32-bit counters wrap on busy interfaces; prefer 64-bit (ifXTable) counters.
+A process restart resets a monotonic counter to zero.
+A sudden impossible negative or enormous delta usually means a reset or a wrap,
+not a real event.
+```
+
+## Resolution
+
+```text
+1. Open the metric in Metric Summary: type, unit, interval.
+2. Reproduce the number in Metrics Explorer with the simplest possible query.
+3. Add one transformation at a time and watch when the number changes.
+4. Compare against the source system independently.
+5. Fix the query or the submission, then fix every copy of it.
+```
+
+## Validation
+
+```text
+the same query returns the same value in Explorer, dashboard, and monitor
+totals reconcile with the source system
+the value behaves sensibly at 1 hour, 1 day, and 1 week
+peaks survive at wide time ranges when that matters
+```
+
+---
+
+# 30. Downtimes, Mutes, and Suppressed Alerts
+
+An alert that never arrives is not always a delivery failure. Sometimes something deliberately suppressed it, possibly months ago.
+
+## Symptoms
+
+```text
+Monitor shows Alert in the UI but nothing was sent
+Alerts stopped for one team or one site only
+Alerts resumed unexpectedly
+Maintenance window ended but alerts stayed silent
+Monitor muted with no obvious owner
+A new host inherits silence it should not have
+```
+
+## Checks
+
+```text
+Is there an active downtime matching this monitor or its scope?
+Is the monitor itself muted?
+Is the host muted?
+Was a downtime created with a scope broader than intended?
+Is the downtime recurring, and did the recurrence outlive its purpose?
+Did a bulk operation mute a large set of monitors?
+Does a downtime scope use a tag that matches more than expected?
+```
+
+## Scope Is the Usual Culprit
+
+```text
+Downtime scope: env:prod             every production monitor
+Downtime scope: host:app-01          one host across all monitors
+Downtime scope: app:abc AND site:bos narrow and intentional
+Downtime scope: *                    everything, including things you forgot
+```
+
+A downtime scoped to a tag will silence anything that later acquires that tag. Onboarding a new host into `app:abc` can hand it a pre-existing silence nobody remembers creating.
+
+## Commands
+
+List downtimes through the API and inspect scope and expiry:
+
+```bash
+curl -s -H "DD-API-KEY: $DD_API_KEY" -H "DD-APPLICATION-KEY: $DD_APP_KEY" \
+  "https://api.<DATADOG_SITE>/api/v1/downtime" \
+  | python -m json.tool
+```
+
+Look specifically for:
+
+```text
+active/disabled state
+scope
+start and end (an empty end is indefinite)
+recurrence rules
+creator and creation date
+```
+
+## Likely Causes
+
+```text
+indefinite downtime created during an incident and never removed
+recurring maintenance window with an overly broad scope
+monitor muted individually during triage
+host muted during patching and never unmuted
+downtime created by automation whose cleanup step failed
+notification suppressed by a monitor option rather than a downtime
+```
+
+## Resolution
+
+```text
+1. Identify every downtime whose scope matches the silent monitor.
+2. Determine intent and owner before cancelling anything.
+3. Narrow scopes rather than deleting suppression wholesale.
+4. Give every downtime an explicit end time unless there is a documented reason.
+5. Review indefinite downtimes on a schedule.
+```
+
+Indefinite, broadly-scoped downtimes are one of the quietest ways for monitoring coverage to decay over time.
+
+## Validation
+
+```text
+force a safe transition and confirm delivery
+confirm the downtime list contains no unexplained indefinite entries
+confirm scheduled maintenance windows match their intended scope
+confirm newly onboarded hosts are not inheriting stale suppression
+```
+
+---
+
+# 31. Network Path and Endpoint Reference
+
+Use this when writing firewall rules, proxy exceptions, or TLS inspection bypasses — and when proving that the network is or is not the problem.
+
+**Always verify against the current documentation for your exact site before making a change.** Endpoint names are site-specific, and the set grows as products are added.
+
+## Site Substitution
+
+Replace `<SITE>` with your Datadog site domain:
+
+```text
+US1    datadoghq.com
+US3    us3.datadoghq.com
+US5    us5.datadoghq.com
+EU1    datadoghq.eu
+AP1    ap1.datadoghq.com
+US1-FED ddog-gov.com
+```
+
+## Destinations by Product
+
+```text
+Metrics, service checks, events, Agent metadata   <VERSION>-app.agent.<SITE>
+                                                  (allowlist *.agent.<SITE>)
+Agent API calls (key validation, etc.)            api.<SITE>
+Agent flare                                       <VERSION>-flare.agent.<SITE>
+Remote Configuration / Fleet Automation           config.<SITE>
+APM                                               trace.agent.<SITE>
+                                                  instrumentation-telemetry-intake.<SITE>
+Profiling                                         intake.profile.<SITE>
+Live processes / containers                       process.<SITE>
+Orchestrator (Kubernetes)                         orchestrator.<SITE>
+                                                  contlcycle-intake.<SITE>
+Container images                                  contimage-intake.<SITE>
+Network Device Monitoring                         ndm-intake.<SITE>
+SNMP traps                                        snmp-traps-intake.<SITE>
+NetFlow                                           ndmflow-intake.<SITE>
+Network Path                                      netpath-intake.<SITE>
+Database Monitoring                               dbm-metrics-intake.<SITE>
+                                                  dbquery-intake.<SITE>
+Logs (HTTP)                                       agent-http-intake.logs.<SITE>
+Logs (TCP)                                        agent-intake.logs.<SITE>
+Synthetics Private Location worker                intake.synthetics.<SITE>
+```
+
+Agent installation and package repositories:
+
+```text
+install.datadoghq.com
+apt.datadoghq.com
+yum.datadoghq.com
+keys.datadoghq.com
+windows-agent.datadoghq.com
+```
+
+The metrics intake hostname includes the Agent version, for example `7-50-0-app.agent.datadoghq.com`. This is why an allowlist must use `*.agent.<SITE>` rather than a single literal hostname: **an Agent upgrade changes the hostname it connects to**, and a literal-hostname firewall rule breaks silently on upgrade.
+
+## Ports
+
+Outbound:
+
+```text
+443/tcp    most Agent traffic (metrics, APM, processes, containers, NDM, remote config)
+10516/tcp  log collection over TCP (when not using HTTP)
+123/udp    NTP
+```
+
+Inbound, local to the host only:
+
+```text
+8125/udp   DogStatsD (localhost unless dogstatsd_non_local_traffic is enabled)
+8126/tcp   APM trace receiver
+5000/tcp   go_expvar
+5001/tcp   Agent IPC API
+5002/tcp   Agent browser GUI
+6062/tcp   Process Agent debug endpoints
+6162/tcp   Process Agent runtime settings
+```
+
+These local ports should not be exposed to untrusted networks. An open trace receiver or DogStatsD port accepts data from anyone who can reach it.
+
+## IP-Based Allowlisting
+
+If policy requires IP ranges rather than hostnames, Datadog publishes per-product IP range files:
+
+```text
+https://ip-ranges.<SITE>/
+https://ip-ranges.<SITE>/logs.json
+https://ip-ranges.<SITE>/apm.json
+```
+
+Allowlist the full published set rather than the subset currently in use; the active addresses vary over time within that set. Automate the refresh — a static copy of an IP list becomes an outage with a delayed fuse.
+
+## Proving the Path
+
+```bash
+# DNS
+dig +short api.<SITE>
+
+# TCP reachability
+nc -vz api.<SITE> 443
+
+# TLS chain as actually presented
+openssl s_client -connect api.<SITE>:443 -servername api.<SITE> </dev/null 2>/dev/null \
+  | openssl x509 -noout -issuer -subject -dates
+
+# Through the configured proxy
+curl -v -x http://proxy.example.com:3128 https://api.<SITE>/api/v1/validate \
+  -H "DD-API-KEY: $DD_API_KEY"
+```
+
+```powershell
+Resolve-DnsName api.<SITE>
+Test-NetConnection api.<SITE> -Port 443
+Invoke-WebRequest "https://api.<SITE>/api/v1/validate" -Headers @{ "DD-API-KEY" = $env:DD_API_KEY } -UseBasicParsing
+```
+
+A successful `/api/v1/validate` proves DNS, routing, TLS, proxy, and key validity in a single call. It is the fastest single test in this guide.
+
+---
+
+# 32. Windows-Specific Notes
+
+Windows hosts fail in ways Linux hosts do not, and the differences cost time at 2 AM.
+
+## Paths
+
+```text
+Binary          C:\Program Files\Datadog\Datadog Agent\bin\agent.exe
+Main config     C:\ProgramData\Datadog\datadog.yaml
+Check configs   C:\ProgramData\Datadog\conf.d\<integration>.d\conf.yaml
+Logs            C:\ProgramData\Datadog\logs\agent.log
+                C:\ProgramData\Datadog\logs\trace-agent.log
+                C:\ProgramData\Datadog\logs\process-agent.log
+```
+
+`C:\ProgramData` is hidden by default in Explorer, which is why people report that "the configuration directory does not exist."
+
+## Services
+
+```text
+datadogagent            core Agent
+datadog-trace-agent     APM
+datadog-process-agent   live processes and containers
+datadog-system-probe    network/system probe, when enabled
+```
+
+```powershell
+Get-Service *datadog*
+Get-Service datadogagent | Select-Object Name, Status, StartType
+Restart-Service datadogagent
+```
+
+## The Agent User
+
+The Agent runs as `ddagentuser` by default. Consequences:
+
+```text
+It must have read access to every configuration file it loads.
+It must have access to any log file you ask it to tail.
+It must have the right to query the resources an integration targets
+(WMI, performance counters, remote systems, and so on).
+A domain policy that resets local account rights can break collection silently.
+```
+
+Grant access explicitly rather than by adding the account to broad groups.
+
+## Event Log and Performance Counters
+
+```text
+Windows Event Log collection is configured through the Agent's event log integration.
+Performance counter checks depend on healthy counters on the host itself.
+```
+
+Rebuild corrupted counters at the OS level before troubleshooting Datadog:
+
+```powershell
+lodctr /R
+```
+
+If the counters are broken, every counter-based integration reports nonsense or nothing, and the Agent is merely the messenger.
+
+## PowerShell Quoting Traps
+
+```powershell
+# Use the call operator for quoted paths
+& "$env:ProgramFiles\Datadog\Datadog Agent\bin\agent.exe" status
+
+# Backtick is the line continuation character, not backslash
+& "$env:ProgramFiles\Datadog\Datadog Agent\bin\agent.exe" `
+  check snmp
+
+# Environment variables set in a session are not visible to the service
+```
+
+That last point causes real confusion: setting `$env:DD_API_KEY` in a console does not change what the Agent service uses. Service-level configuration lives in `datadog.yaml` or in machine-level environment variables, and requires a service restart.
+
+## Time
+
+```powershell
+w32tm /query /status
+w32tm /query /source
+w32tm /resync
+```
+
+Domain-joined machines should follow the domain hierarchy. A VM that syncs from both a hypervisor and a domain controller can drift in ways that look like intermittent Datadog failures.
+
+---
+
+# 33. Migration-Era Pitfalls
+
+Guidance for teams moving from a legacy platform (SolarWinds Orion or similar) to Datadog, where parity — not novelty — is the objective.
+
+## Identity and Naming
+
+```text
+Legacy node names may not match the Agent hostname Datadog derives.
+Interface indexes are not stable identifiers across reboots or firmware changes.
+Device IP is identity in NDM, within a namespace; plan the namespace deliberately.
+A rename during migration creates a second identity rather than updating the first.
+```
+
+Decide and document the identity strategy **before** bulk onboarding, because monitors, dashboards, and routing all encode it.
+
+## Imported Tag Values
+
+Data exported from a legacy system rarely matches the casing and vocabulary you want in Datadog.
+
+```text
+Normalize to lowercase before submission.
+Map legacy custom properties to a deliberate tag schema rather than copying keys verbatim.
+Reject values that do not match the schema instead of importing them "for now".
+```
+
+See section 28. Every inconsistency imported during migration will be encoded into monitors and routing within days.
+
+## Alert Parity Is Not Alert Translation
+
+```text
+Legacy threshold semantics rarely map one-to-one onto Datadog evaluation windows.
+A legacy "node down" check is usually a service check or host monitor in Datadog,
+not a metric threshold.
+Legacy dependency suppression has no automatic equivalent; plan explicitly.
+Legacy mute/unmanage windows map to downtimes with scopes, not to per-object flags.
+```
+
+Translate intent, not configuration. A faithful copy of a legacy alert often produces either constant noise or silence.
+
+## Parallel Run
+
+```text
+Run both platforms for a defined overlap period.
+Compare alert volume per application and per site, not just in aggregate.
+Investigate every alert that fires in one platform and not the other.
+Track coverage explicitly: which objects are monitored in old but not new?
+Record the cutover criteria before the cutover week, not during it.
+```
+
+The two most valuable artifacts from a parallel run are a list of objects monitored in the old system with no equivalent in the new one, and a list of monitors in the new system that match no routing rule.
+
+## Routing Coverage
+
+```text
+Every monitor should match at least one notification rule.
+Every application team should have a verified recipient.
+Every rule should be tested with one real transition before bulk enablement.
+Recovery paths deserve the same testing as alert paths.
+```
+
+A monitor that fires correctly and notifies nobody is worse than no monitor, because it creates the appearance of coverage.
+
+## Decommission Checklist
+
+```text
+[ ] All objects onboarded and reporting in Datadog
+[ ] Tag compliance verified across hosts, monitors, synthetics, dashboards
+[ ] Every monitor matched to a notification rule
+[ ] Alert and recovery paths tested per application team
+[ ] Dashboards rebuilt and validated by their owners
+[ ] Parallel-run discrepancies resolved or explicitly accepted
+[ ] Credentials rotated out of the legacy platform
+[ ] Legacy polling disabled before decommission, not after
+[ ] Historical data retention/export requirements satisfied
+[ ] Rollback plan documented for the cutover window
+```
+
+Disable legacy polling before decommissioning the legacy platform. Devices with ACLs permitting only the legacy poller are discovered at that moment, not later.
+
+---
+
+# 34. Fast Command Reference
 
 ## Agent - Linux
 
@@ -3171,6 +4951,39 @@ Get-Service DatadogAgent
 & "$env:ProgramFiles\Datadog\Datadog Agent\bin\agent.exe" check <CHECK_NAME>
 ```
 
+## Agent - Diagnostics and Configuration
+
+```bash
+sudo datadog-agent diagnose
+sudo datadog-agent configcheck
+sudo datadog-agent config
+sudo datadog-agent config set log_level debug
+sudo datadog-agent config set log_level info
+sudo datadog-agent tagger-list
+sudo datadog-agent workload-list
+sudo datadog-agent secret
+sudo datadog-agent dogstatsd-stats
+sudo datadog-agent stream-logs
+sudo datadog-agent integration show <INTEGRATION>
+sudo datadog-agent integration freeze
+sudo datadog-agent status -j
+sudo datadog-agent flare --local
+```
+
+Windows equivalents use the same subcommands:
+
+```powershell
+& "$env:ProgramFiles\Datadog\Datadog Agent\bin\agent.exe" configcheck
+& "$env:ProgramFiles\Datadog\Datadog Agent\bin\agent.exe" tagger-list
+& "$env:ProgramFiles\Datadog\Datadog Agent\bin\agent.exe" secret
+```
+
+Available subcommands vary by Agent version:
+
+```bash
+sudo datadog-agent --help
+```
+
 ## Docker
 
 ```bash
@@ -3180,6 +4993,8 @@ docker logs <container>
 docker inspect <container>
 docker stats <container>
 docker exec -it <datadog-agent> agent status
+docker exec -it <datadog-agent> agent configcheck
+docker exec -it <datadog-agent> agent tagger-list
 ```
 
 ## Kubernetes
@@ -3225,6 +5040,24 @@ Windows:
 & "$env:ProgramFiles\Datadog\Datadog Agent\bin\agent.exe" check vsphere
 ```
 
+## API Smoke Tests
+
+```bash
+# Validate key, site, DNS, TLS, and proxy in one call
+curl -s -o /dev/null -w "%{http_code}\n" \
+  -H "DD-API-KEY: $DD_API_KEY" \
+  "https://api.<DATADOG_SITE>/api/v1/validate"
+
+# Inspect rate-limit headers
+curl -i -H "DD-API-KEY: $DD_API_KEY" -H "DD-APPLICATION-KEY: $DD_APP_KEY" \
+  "https://api.<DATADOG_SITE>/api/v1/monitor" | head -40
+```
+
+```powershell
+$h = @{ "DD-API-KEY" = $env:DD_API_KEY }
+Invoke-WebRequest "https://api.<DATADOG_SITE>/api/v1/validate" -Headers $h -UseBasicParsing
+```
+
 ## Network
 
 Linux:
@@ -3235,6 +5068,8 @@ nslookup <target>
 dig <target>
 ss -lntp
 ip route
+openssl s_client -connect <target>:443 -servername <target> </dev/null
+nc -vz <target> 443
 ```
 
 Windows:
@@ -3247,9 +5082,9 @@ Get-NetTCPConnection
 
 ---
 
-# 26. Troubleshooting Decision Trees
+# 35. Troubleshooting Decision Trees
 
-## 26.1 "No Data"
+## 35.1 "No Data"
 
 ```text
 Dashboard / Monitor says No Data
@@ -3270,7 +5105,7 @@ Agent check   Remove filters
 status        one at a time
 ```
 
-## 26.2 "Host Down"
+## 35.2 "Host Down"
 
 ```text
 Host monitor alert
@@ -3293,7 +5128,7 @@ incident       │
  service        forwarder/site/key
 ```
 
-## 26.3 "SNMP Device Missing"
+## 35.3 "SNMP Device Missing"
 
 ```text
 Device missing
@@ -3316,7 +5151,7 @@ scope     │
            Datadog metadata
 ```
 
-## 26.4 "Monitor Alert, No Notification"
+## 35.4 "Monitor Alert, No Notification"
 
 ```text
 Monitor status = Alert
@@ -3337,7 +5172,7 @@ Recipient integration healthy?
 Downstream receiver accepted?
 ```
 
-## 26.5 "APM Missing"
+## 35.5 "APM Missing"
 
 ```text
 No traces
@@ -3362,9 +5197,57 @@ SDK       ┌┴┐
             config service naming
 ```
 
+## 35.6 "Custom Metric Missing"
+
+```text
+Custom metric absent
+       │
+       ▼
+Submitted via DogStatsD or API?
+   ┌───┴───┐
+DogStatsD  API
+   │        │
+   ▼        ▼
+dogstatsd-  HTTP status
+stats shows  code?
+packets?     │
+   │      ┌──┴──┐
+ ┌─┴─┐   2xx   4xx
+NO   YES  │      │
+ │    │   ▼      ▼
+ ▼    ▼  wait/  fix request
+client Agent   query    (auth/shape/
+/port  received          timestamp)
+issue  it → tag,
+       name, or
+       query issue
+```
+
+## 35.7 "Tag Mismatch"
+
+```text
+Query/rule matches nothing
+         │
+         ▼
+Does the tag key exist on this data type?
+    ┌────┴────┐
+   NO        YES
+    │         │
+    ▼         ▼
+Applied at  Values match exactly
+wrong layer  (including case)?
+(host vs      ┌────┴────┐
+metric vs    NO        YES
+monitor)      │         │
+              ▼         ▼
+        normalize   time range /
+        and re-     permission /
+        submit      object scope
+```
+
 ---
 
-# 27. Escalation Evidence Template
+# 36. Escalation Evidence Template
 
 Copy this into a support ticket or incident record.
 
@@ -3404,6 +5287,9 @@ Agent version:
 Integration version:
 Worker version:
 Tracer version:
+Proxy in path: Yes / No
+TLS inspection in path: Yes / No / Unknown
+Clock offset from agent status:
 
 Exact query:
 Expected result:
@@ -3431,13 +5317,17 @@ Screenshots attached:
   [ ] error
   [ ] timeline
 
+Relevant tags on the affected object:
+Notification rule expected to match:
+Downtime/mute checked: Yes / No
+
 Flare collected:
 Support case ID:
 ```
 
 ---
 
-# 28. Official References
+# 37. Official References
 
 Use these as the authoritative starting points because Datadog behavior evolves.
 
@@ -3445,6 +5335,21 @@ Use these as the authoritative starting points because Datadog behavior evolves.
 
 - Agent Troubleshooting  
   https://docs.datadoghq.com/agent/troubleshooting/
+
+- Network Traffic (endpoints and ports)  
+  https://docs.datadoghq.com/agent/configuration/network/
+
+- Agent Proxy Configuration  
+  https://docs.datadoghq.com/agent/configuration/proxy/
+
+- Secrets Management  
+  https://docs.datadoghq.com/agent/configuration/secrets-management/
+
+- Datadog Sites  
+  https://docs.datadoghq.com/getting_started/site/
+
+- Datadog Status Page  
+  https://status.datadoghq.com
 
 - Agent Commands  
   https://docs.datadoghq.com/agent/configuration/agent-commands/
@@ -3527,6 +5432,39 @@ Use these as the authoritative starting points because Datadog behavior evolves.
 
 - Notifications  
   https://docs.datadoghq.com/monitors/notify/
+
+## Metrics, Tags, and Queries
+
+- Metric Types  
+  https://docs.datadoghq.com/metrics/types/
+
+- Getting Started with Tags  
+  https://docs.datadoghq.com/getting_started/tagging/
+
+- Using Tags  
+  https://docs.datadoghq.com/getting_started/tagging/using_tags/
+
+- Unified Service Tagging  
+  https://docs.datadoghq.com/getting_started/tagging/unified_service_tagging/
+
+- Rollup and Query Functions  
+  https://docs.datadoghq.com/dashboards/functions/rollup/
+
+- DogStatsD  
+  https://docs.datadoghq.com/developers/dogstatsd/
+
+## Cloud Integrations
+
+- Amazon Web Services  
+  https://docs.datadoghq.com/integrations/amazon_web_services/
+
+- Microsoft Azure  
+  https://docs.datadoghq.com/integrations/azure/
+
+## Monitor Suppression
+
+- Downtimes  
+  https://docs.datadoghq.com/monitors/downtimes/
 
 ## API
 
